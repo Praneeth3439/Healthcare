@@ -1,0 +1,70 @@
+{
+  "tables": [
+    {
+      "name": "healthcare-users",
+      "partitionKey": { "name": "id", "type": "String" },
+      "sortKey": null,
+      "billingMode": "PAY_PER_REQUEST",
+      "attributes": {
+        "id": "Unique user ID (usr-xxx or Cognito sub)",
+        "fullName": "User full name",
+        "email": "Email address",
+        "phoneNumber": "Contact number (optional)",
+        "city": "User city",
+        "state": "User state",
+        "userType": "Patient | Student | Healthcare Professional | General User",
+        "createdAt": "ISO 8601 creation timestamp"
+      }
+    },
+    {
+      "name": "healthcare-observations",
+      "partitionKey": { "name": "userId", "type": "String" },
+      "sortKey": { "name": "timestamp", "type": "String" },
+      "billingMode": "PAY_PER_REQUEST",
+      "attributes": {
+        "id": "Observation ID (obs-xxx)",
+        "userId": "User ID foreign key",
+        "timestamp": "ISO 8601 timestamp",
+        "heartRate": "Heart rate in bpm",
+        "systolicBp": "Systolic BP in mmHg",
+        "diastolicBp": "Diastolic BP in mmHg",
+        "bloodGlucose": "Blood glucose in mg/dL",
+        "temperature": "Temperature in Fahrenheit",
+        "oxygenSaturation": "SpO2 percentage",
+        "respiratoryRate": "Breaths per minute",
+        "weight": "Weight in kg",
+        "category": "normal | elevated | alert",
+        "notes": "Observation clinical context"
+      }
+    },
+    {
+      "name": "healthcare-screening-results",
+      "partitionKey": { "name": "userId", "type": "String" },
+      "sortKey": { "name": "timestamp", "type": "String" },
+      "billingMode": "PAY_PER_REQUEST",
+      "attributes": {
+        "id": "Screening ID (scr-xxx)",
+        "userId": "User ID foreign key",
+        "timestamp": "ISO 8601 timestamp",
+        "overallRisk": "Low Risk | Moderate Risk | Higher Risk",
+        "riskScore": "Computed numeric score (0-100)",
+        "bmi": "Body mass index float",
+        "bmiCategory": "Underweight | Normal weight | Overweight | Obese",
+        "contributingFactors": "List of risk factors with severity tags",
+        "recommendations": "List of actionable health guidance strings",
+        "disclaimer": "Mandatory non-diagnostic legal disclaimer"
+      }
+    },
+    {
+      "name": "healthcare-saved-institutions",
+      "partitionKey": { "name": "userId", "type": "String" },
+      "sortKey": { "name": "institutionId", "type": "String" },
+      "billingMode": "PAY_PER_REQUEST",
+      "attributes": {
+        "userId": "User ID foreign key",
+        "institutionId": "NIRF institution ID (e.g. nirf-med-001)",
+        "savedAt": "ISO 8601 timestamp"
+      }
+    }
+  ]
+}

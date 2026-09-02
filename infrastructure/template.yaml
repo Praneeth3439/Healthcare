@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  HEALTHCARE Platform - Serverless Architecture
+  (API Gateway, Lambda, DynamoDB, Cognito, S3, CloudFront, CloudWatch)
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: python3.10
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        USERS_TABLE_NAME: !Ref UsersTable
+        OBSERVATIONS_TABLE_NAME: !Ref HealthObservationsTable
+        SCREENING_TABLE_NAME: !Ref ScreeningResultsTable
+        SAVED_TABLE_NAME: !Ref SavedInstitutionsTable
+
+Resources:
+  # =========================================================================
+  # 1. API GATEWAY (HTTP API)
+  # =========================================================================
+  HealthcareHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        MaxAge: 86400
+
+  # =========================================================================
+  # 2. DYNAMODB TABLES
+  # =========================================================================
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: healthcare-users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  HealthObservationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: healthcare-observations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+
+  ScreeningResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: healthcare-screening-results
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+
+  SavedInstitutionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: healthcare-saved-institutions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: institutionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: institutionId
+          KeyType: RANGE
+
+  # =========================================================================
+  # 3. AMAZON COGNITO AUTHENTICATION
+  # =========================================================================
+  HealthcareUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: healthcare-user-pool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+
+  HealthcareUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: healthcare-spa-client
+      UserPoolId: !Ref HealthcareUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # =========================================================================
+  # 4. LAMBDA FUNCTIONS
+  # =========================================================================
+  InstitutionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/institutions/
+      Handler: app.lambda_handler
+      Description: NIRF 2025 medical institution search, details, and geospatial radius API
+      Events:
+        GetInstitutions:
+          Type: HttpApi
+          Properties:
+            Path: /institutions
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        GetInstitutionById:
+          Type: HttpApi
+          Properties:
+            Path: /institutions/{id}
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        GetNearby:
+          Type: HttpApi
+          Properties:
+            Path: /institutions/nearby
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        GetStates:
+          Type: HttpApi
+          Properties:
+            Path: /states
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        GetCities:
+          Type: HttpApi
+          Properties:
+            Path: /cities
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+
+  ScreeningFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/screening/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScreeningResultsTable
+      Events:
+        PostScreening:
+          Type: HttpApi
+          Properties:
+            Path: /screening
+            Method: post
+            ApiId: !Ref HealthcareHttpApi
+        GetScreeningHistory:
+          Type: HttpApi
+          Properties:
+            Path: /screening/history
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+
+  MonitoringFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/monitoring/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HealthObservationsTable
+      Events:
+        PostMonitoring:
+          Type: HttpApi
+          Properties:
+            Path: /monitoring
+            Method: post
+            ApiId: !Ref HealthcareHttpApi
+        GetMonitoring:
+          Type: HttpApi
+          Properties:
+            Path: /monitoring
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/profile/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SavedInstitutionsTable
+      Events:
+        GetProfile:
+          Type: HttpApi
+          Properties:
+            Path: /profile
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        PutProfile:
+          Type: HttpApi
+          Properties:
+            Path: /profile
+            Method: put
+            ApiId: !Ref HealthcareHttpApi
+        GetSaved:
+          Type: HttpApi
+          Properties:
+            Path: /saved-institutions
+            Method: get
+            ApiId: !Ref HealthcareHttpApi
+        PostSaved:
+          Type: HttpApi
+          Properties:
+            Path: /saved-institutions
+            Method: post
+            ApiId: !Ref HealthcareHttpApi
+
+  # =========================================================================
+  # 5. S3 & CLOUDFRONT FRONTEND HOSTING
+  # =========================================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'healthcare-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: HealthcareOAC
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for Healthcare API Gateway HTTP API
+    Value: !Sub 'https://${HealthcareHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref HealthcareUserPool
+  CognitoClientId:
+    Description: Cognito App Client ID
+    Value: !Ref HealthcareUserPoolClient
+  FrontendBucketName:
+    Description: S3 Bucket Name for React Frontend
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionDomain:
+    Description: CloudFront CDN Domain URL
+    Value: !GetAtt CloudFrontDistribution.DomainName
