@@ -26,10 +26,30 @@ import sys
 import json
 import math
 import time
+import secrets
+import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
+
+import bcrypt
+import jwt
+import resend
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import psycopg2
+
+from auth_db import (
+    init_auth_db,
+    find_user_by_email,
+    create_user,
+    update_password,
+    create_reset_token,
+    get_reset_token,
+    mark_reset_token_used,
+)
+
 
 # Ensure backend root is in sys.path for submodule imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +58,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 # Initialize Flask application
 app = Flask(__name__)
 
+# ----------------------------------------------------------------------
+# Authentication Configuration
+# ----------------------------------------------------------------------
+
+JWT_SECRET = os.environ.get("JWT_SECRET")
+
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET is not configured.")
+
+FRONTEND_URL = os.environ.get(
+    "FRONTEND_URL",
+    "http://localhost:5173"
+).rstrip("/")
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+EMAIL_FROM = os.environ.get("EMAIL_FROM")
+
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
 # Configure CORS
 # Allow Vercel frontend domains, local development, or configured origins via environment
 cors_origins_env = os.environ.get('CORS_ORIGINS', '*')
@@ -535,6 +574,416 @@ def saved_institutions():
 
     return jsonify({'savedIds': DEMO_SAVED_IDS}), 200
 
+# ----------------------------------------------------------------------
+# 5. Authentication Endpoints
+# ----------------------------------------------------------------------
+
+def ensure_auth_db():
+    """Create authentication tables if they do not exist."""
+    init_auth_db()
+
+
+def create_jwt_token(user):
+    """Create a JWT access token for an authenticated user."""
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "sub": str(user["id"]),
+        "email": user["email"],
+        "exp": now + timedelta(hours=24),
+        "iat": now,
+    }
+
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def public_user(user):
+    """Return safe user fields only."""
+    return {
+        "id": str(user["id"]),
+        "email": user["email"],
+        "fullName": user["full_name"],
+        "userType": user.get("user_type") or "Patient",
+        "phoneNumber": user.get("phone_number"),
+        "city": user.get("city"),
+        "state": user.get("state"),
+        "createdAt": (
+            user["created_at"].isoformat()
+            if user.get("created_at")
+            else None
+        ),
+    }
+
+
+def get_bearer_token():
+    """Read JWT token from Authorization header."""
+    auth_header = request.headers.get("Authorization", "")
+
+    if not auth_header.startswith("Bearer "):
+        return None
+
+    return auth_header.split(" ", 1)[1].strip()
+
+
+def get_authenticated_user():
+    """Validate JWT and return the corresponding user."""
+    token = get_bearer_token()
+
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"]
+        )
+
+        user_id = payload.get("sub")
+
+        if not user_id:
+            return None
+
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM users
+                    WHERE id = %s
+                    """,
+                    (user_id,)
+                )
+
+                return cur.fetchone()
+
+        finally:
+            conn.close()
+
+    except Exception:
+        return None
+
+
+@app.route('/auth/register', methods=['POST'])
+def auth_register():
+    """Register a new healthcare platform user."""
+    try:
+        ensure_auth_db()
+
+        body = request.get_json(force=True, silent=True) or {}
+
+        email = str(body.get("email", "")).strip().lower()
+        password = str(body.get("password", ""))
+        full_name = str(
+            body.get("fullName", body.get("full_name", ""))
+        ).strip()
+
+        user_type = str(
+            body.get("userType", "Patient")
+        ).strip()
+
+        phone_number = body.get(
+            "phoneNumber",
+            body.get("phone_number")
+        )
+
+        city = body.get("city")
+        state = body.get("state")
+
+        if not email or not password or not full_name:
+            return jsonify({
+                "error": "Email, password and full name are required."
+            }), 400
+
+        if len(password) < 8:
+            return jsonify({
+                "error": "Password must be at least 8 characters."
+            }), 400
+
+        existing_user = find_user_by_email(email)
+
+        if existing_user:
+            return jsonify({
+                "error": "An account with this email already exists."
+            }), 409
+
+        password_hash = bcrypt.hashpw(
+            password.encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+        user = create_user(
+            email=email,
+            password_hash=password_hash,
+            full_name=full_name,
+            user_type=user_type or "Patient",
+            phone_number=phone_number,
+            city=city,
+            state=state,
+        )
+
+        token = create_jwt_token(user)
+
+        return jsonify({
+            "message": "Registration successful.",
+            "user": public_user(user),
+            "token": token,
+        }), 201
+
+    except Exception as exc:
+        print(f"Registration error: {exc}")
+
+        return jsonify({
+            "error": "Registration failed. Please try again."
+        }), 500
+
+
+@app.route('/auth/login', methods=['POST'])
+def auth_login():
+    """Authenticate an existing user."""
+    try:
+        ensure_auth_db()
+
+        body = request.get_json(force=True, silent=True) or {}
+
+        email = str(body.get("email", "")).strip().lower()
+        password = str(body.get("password", ""))
+
+        if not email or not password:
+            return jsonify({
+                "error": "Email and password are required."
+            }), 400
+
+        user = find_user_by_email(email)
+
+        if not user:
+            return jsonify({
+                "error": "Invalid email or password."
+            }), 401
+
+        password_valid = bcrypt.checkpw(
+            password.encode("utf-8"),
+            user["password_hash"].encode("utf-8")
+        )
+
+        if not password_valid:
+            return jsonify({
+                "error": "Invalid email or password."
+            }), 401
+
+        token = create_jwt_token(user)
+
+        return jsonify({
+            "message": "Login successful.",
+            "user": public_user(user),
+            "token": token,
+        }), 200
+
+    except Exception as exc:
+        print(f"Login error: {exc}")
+
+        return jsonify({
+            "error": "Login failed. Please try again."
+        }), 500
+
+
+@app.route('/auth/me', methods=['GET'])
+def auth_me():
+    """Return the currently authenticated user."""
+    user = get_authenticated_user()
+
+    if not user:
+        return jsonify({
+            "error": "Authentication required."
+        }), 401
+
+    return jsonify({
+        "user": public_user(user)
+    }), 200
+
+
+@app.route('/auth/logout', methods=['POST'])
+def auth_logout():
+    """
+    Logout endpoint.
+
+    JWTs are stateless, so the frontend removes its stored token.
+    """
+    return jsonify({
+        "message": "Logged out successfully."
+    }), 200
+
+
+@app.route('/auth/forgot-password', methods=['POST'])
+def auth_forgot_password():
+    """Create a secure password reset token and email it."""
+    try:
+        ensure_auth_db()
+
+        body = request.get_json(force=True, silent=True) or {}
+
+        email = str(body.get("email", "")).strip().lower()
+
+        # Always return the same response to prevent account enumeration.
+        generic_response = {
+            "message": (
+                "If an account exists for this email, "
+                "password reset instructions have been sent."
+            )
+        }
+
+        if not email:
+            return jsonify(generic_response), 200
+
+        user = find_user_by_email(email)
+
+        if not user:
+            return jsonify(generic_response), 200
+
+        raw_token = secrets.token_urlsafe(48)
+
+        token_hash = hashlib.sha256(
+            raw_token.encode("utf-8")
+        ).hexdigest()
+
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+        create_reset_token(
+            user_id=user["id"],
+            token_hash=token_hash,
+            expires_at=expires_at
+        )
+
+        reset_url = (
+            f"{FRONTEND_URL}/reset-password"
+            f"?token={raw_token}"
+        )
+
+        if RESEND_API_KEY and EMAIL_FROM:
+            resend.Emails.send({
+                "from": EMAIL_FROM,
+                "to": [user["email"]],
+                "subject": "Reset your HEALTHCARE password",
+                "html": f"""
+                    <div style="font-family: Arial, sans-serif;">
+                        <h2>Reset your HEALTHCARE password</h2>
+
+                        <p>
+                            We received a request to reset your password.
+                        </p>
+
+                        <p>
+                            Click the button below to create a new password.
+                        </p>
+
+                        <p>
+                            <a
+                                href="{reset_url}"
+                                style="
+                                    display:inline-block;
+                                    padding:12px 20px;
+                                    background:#2563eb;
+                                    color:white;
+                                    text-decoration:none;
+                                    border-radius:6px;
+                                "
+                            >
+                                Reset Password
+                            </a>
+                        </p>
+
+                        <p>
+                            This link expires in 30 minutes and can only
+                            be used once.
+                        </p>
+
+                        <p>
+                            If you did not request this, you can safely
+                            ignore this email.
+                        </p>
+                    </div>
+                """
+            })
+        else:
+            print(
+                "Password reset email was not sent because "
+                "RESEND_API_KEY or EMAIL_FROM is missing."
+            )
+
+        return jsonify(generic_response), 200
+
+    except Exception as exc:
+        print(f"Forgot password error: {exc}")
+
+        # Do not reveal whether the account exists.
+        return jsonify({
+            "message": (
+                "If an account exists for this email, "
+                "password reset instructions have been sent."
+            )
+        }), 200
+
+
+@app.route('/auth/reset-password', methods=['POST'])
+def auth_reset_password():
+    """Reset a user's password using a valid one-time token."""
+    try:
+        ensure_auth_db()
+
+        body = request.get_json(force=True, silent=True) or {}
+
+        token = str(body.get("token", "")).strip()
+        new_password = str(
+            body.get("password", body.get("newPassword", ""))
+        )
+
+        if not token or not new_password:
+            return jsonify({
+                "error": "Reset token and new password are required."
+            }), 400
+
+        if len(new_password) < 8:
+            return jsonify({
+                "error": "Password must be at least 8 characters."
+            }), 400
+
+        token_hash = hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+        reset_record = get_reset_token(token_hash)
+
+        if not reset_record:
+            return jsonify({
+                "error": "Invalid or expired reset link."
+            }), 400
+
+        password_hash = bcrypt.hashpw(
+            new_password.encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+        update_password(
+            user_id=reset_record["user_id"],
+            password_hash=password_hash
+        )
+
+        mark_reset_token_used(
+            token_id=reset_record["id"]
+        )
+
+        return jsonify({
+            "message": "Password reset successful."
+        }), 200
+
+    except Exception as exc:
+        print(f"Reset password error: {exc}")
+
+        return jsonify({
+            "error": "Password reset failed. Please try again."
+        }), 500
 
 # ----------------------------------------------------------------------
 # 6. Error Handlers
