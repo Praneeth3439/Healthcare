@@ -18,6 +18,8 @@ def init_auth_db():
     try:
         with conn.cursor() as cur:
             cur.execute("""
+                CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
                 CREATE TABLE IF NOT EXISTS users (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     email VARCHAR(255) UNIQUE NOT NULL,
