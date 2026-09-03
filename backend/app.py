@@ -40,7 +40,7 @@ from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from auth_db import (
+from backend.auth_db import (
     init_auth_db,
     find_user_by_email,
     create_user,
