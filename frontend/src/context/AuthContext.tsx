@@ -21,64 +21,112 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const LOCAL_STORAGE_USER_KEY = 'healthcare_auth_user';
 const LOCAL_STORAGE_TOKEN_KEY = 'healthcare_auth_token';
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  'https://healthcare-api-tbqv.onrender.com';
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    try {
-      const storedUser = localStorage.getItem(LOCAL_STORAGE_USER_KEY);
-      const storedToken = localStorage.getItem(LOCAL_STORAGE_TOKEN_KEY);
-      if (storedUser && storedToken) {
-        setUser(JSON.parse(storedUser));
+    const restoreSession = async () => {
+      try {
+        const storedToken = localStorage.getItem(LOCAL_STORAGE_TOKEN_KEY);
+
+        if (!storedToken) {
+          setUser(null);
+          setToken(null);
+          return;
+        }
+
+        const response = await fetch(`${API_BASE_URL}/auth/me`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${storedToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          localStorage.removeItem(LOCAL_STORAGE_USER_KEY);
+          localStorage.removeItem(LOCAL_STORAGE_TOKEN_KEY);
+          setUser(null);
+          setToken(null);
+          return;
+        }
+
+        const data = await response.json();
+
+        setUser(data.user);
         setToken(storedToken);
-      } else {
-        // Default authenticated demo profile for smooth exploration
-        const demoUser: UserProfile = {
-          id: 'usr-demo-001',
-          fullName: 'Dr. Sarah Jenkins',
-          email: 'sarah.jenkins@healthcare.org',
-          phoneNumber: '+91 98765 43210',
-          city: 'New Delhi',
-          state: 'Delhi',
-          userType: 'Healthcare Professional',
-          createdAt: new Date().toISOString(),
-        };
-        setUser(demoUser);
-        setToken('mock-jwt-token-cognito-demo');
-        localStorage.setItem(LOCAL_STORAGE_USER_KEY, JSON.stringify(demoUser));
-        localStorage.setItem(LOCAL_STORAGE_TOKEN_KEY, 'mock-jwt-token-cognito-demo');
+
+        localStorage.setItem(
+          LOCAL_STORAGE_USER_KEY,
+          JSON.stringify(data.user)
+        );
+      } catch (error) {
+        console.error('Error restoring authentication session:', error);
+
+        localStorage.removeItem(LOCAL_STORAGE_USER_KEY);
+        localStorage.removeItem(LOCAL_STORAGE_TOKEN_KEY);
+
+        setUser(null);
+        setToken(null);
+      } finally {
+        setIsLoading(false);
       }
-    } catch (e) {
-      console.error('Error restoring auth state', e);
+    };
+
+    restoreSession();
+  }, []);
+
+  const login = async (
+    email: string,
+    pass: string
+  ): Promise<boolean> => {
+    setIsLoading(true);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          password: pass,
+        }),
+      });
+
+      if (!response.ok) {
+        return false;
+      }
+
+      const data = await response.json();
+
+      setUser(data.user);
+      setToken(data.token);
+
+      localStorage.setItem(
+        LOCAL_STORAGE_USER_KEY,
+        JSON.stringify(data.user)
+      );
+
+      localStorage.setItem(
+        LOCAL_STORAGE_TOKEN_KEY,
+        data.token
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Login error:', error);
+      return false;
     } finally {
       setIsLoading(false);
     }
-  }, []);
-
-  const login = async (email: string): Promise<boolean> => {
-    setIsLoading(true);
-    // Simulates Cognito User Pool Authentication
-    await new Promise((resolve) => setTimeout(resolve, 600));
-
-    const loggedUser: UserProfile = {
-      id: `usr-${Date.now()}`,
-      fullName: email.split('@')[0].replace('.', ' ').replace(/^./, (str) => str.toUpperCase()),
-      email,
-      city: 'Delhi',
-      state: 'Delhi',
-      userType: 'Patient',
-      createdAt: new Date().toISOString(),
-    };
-
-    const mockToken = `jwt-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
-    setUser(loggedUser);
-    setToken(mockToken);
-    localStorage.setItem(LOCAL_STORAGE_USER_KEY, JSON.stringify(loggedUser));
-    localStorage.setItem(LOCAL_STORAGE_TOKEN_KEY, mockToken);
-    setIsLoading(false);
-    return true;
   };
 
   const register = async (data: {
@@ -88,43 +136,90 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     city?: string;
     state?: string;
     userType: UserRole;
+    password: string;
   }): Promise<boolean> => {
     setIsLoading(true);
-    // Simulates Cognito SignUp
-    await new Promise((resolve) => setTimeout(resolve, 800));
 
-    const newUser: UserProfile = {
-      id: `usr-${Date.now()}`,
-      fullName: data.fullName,
-      email: data.email,
-      phoneNumber: data.phoneNumber,
-      city: data.city || 'Bengaluru',
-      state: data.state || 'Karnataka',
-      userType: data.userType,
-      createdAt: new Date().toISOString(),
-    };
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fullName: data.fullName,
+          email: data.email,
+          phoneNumber: data.phoneNumber,
+          city: data.city,
+          state: data.state,
+          userType: data.userType,
+          password: data.password,
+        }),
+      });
 
-    const mockToken = `jwt-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
-    setUser(newUser);
-    setToken(mockToken);
-    localStorage.setItem(LOCAL_STORAGE_USER_KEY, JSON.stringify(newUser));
-    localStorage.setItem(LOCAL_STORAGE_TOKEN_KEY, mockToken);
-    setIsLoading(false);
-    return true;
+      if (!response.ok) {
+        return false;
+      }
+
+      const result = await response.json();
+
+      setUser(result.user);
+      setToken(result.token);
+
+      localStorage.setItem(
+        LOCAL_STORAGE_USER_KEY,
+        JSON.stringify(result.user)
+      );
+
+      localStorage.setItem(
+        LOCAL_STORAGE_TOKEN_KEY,
+        result.token
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Registration error:', error);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const logout = () => {
+    const storedToken = localStorage.getItem(LOCAL_STORAGE_TOKEN_KEY);
+
+    if (storedToken) {
+      fetch(`${API_BASE_URL}/auth/logout`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${storedToken}`,
+        },
+      }).catch(() => {
+        // Local logout still proceeds if the API is unavailable.
+      });
+    }
+
     setUser(null);
     setToken(null);
+
     localStorage.removeItem(LOCAL_STORAGE_USER_KEY);
     localStorage.removeItem(LOCAL_STORAGE_TOKEN_KEY);
   };
 
   const updateProfile = (updated: Partial<UserProfile>) => {
     if (!user) return;
-    const nextUser = { ...user, ...updated };
+
+    const nextUser = {
+      ...user,
+      ...updated,
+    };
+
     setUser(nextUser);
-    localStorage.setItem(LOCAL_STORAGE_USER_KEY, JSON.stringify(nextUser));
+
+    localStorage.setItem(
+      LOCAL_STORAGE_USER_KEY,
+      JSON.stringify(nextUser)
+    );
   };
 
   return (
@@ -132,7 +227,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         token,
-        isAuthenticated: !!user,
+        isAuthenticated: !!user && !!token,
         isLoading,
         login,
         register,
@@ -147,8 +242,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useAuth = (): AuthContextType => {
   const context = useContext(AuthContext);
+
   if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
+
   return context;
 };
