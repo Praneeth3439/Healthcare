@@ -29,6 +29,7 @@ import time
 from typing import Dict, Any, List, Optional
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import psycopg2
 
 # Ensure backend root is in sys.path for submodule imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -265,6 +266,31 @@ def health():
         'institutions_loaded': len(INSTITUTIONS),
         'environment': os.environ.get('RENDER_ENVIRONMENT', os.environ.get('ENV', 'production'))
     }), 200
+@app.route('/health/db', methods=['GET'])
+def database_health():
+    try:
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                result = cur.fetchone()
+
+            return jsonify({
+                "status": "healthy",
+                "database": "connected",
+                "test": result[0]
+            }), 200
+
+        finally:
+            conn.close()
+
+    except Exception as exc:
+        return jsonify({
+            "status": "unhealthy",
+            "database": "connection_failed",
+            "error": "Database connection failed"
+        }), 500
 
 
 @app.route('/', methods=['GET'])
